@@ -1,11 +1,14 @@
-// Dodge or Splat: funny things are thrown at your face, endlessly — a cream
-// pie, a suction dart, a snowball, a fish. Stay put and they hit, hard
-// (Burst.tsx), and stay a while: cream and snow on the face itself
-// (FaceMess.tsx), the rest on the filtered head (Stuck.tsx; FilteredHead.tsx
-// is the SDK's canonical head fit through a spring, with the depth-only head
-// occluder in the same group), until they slide off, melt or pop off.
-// Throws fly in world space (Projectiles.tsx) and draw over everything.
-import { useEffect, useRef } from "react";
+// Dodge or Splat: funny things are thrown at your face, endlessly — mostly
+// cream pies, and suction darts, snowballs and fish — faster and faster
+// (director.ts). Lean or duck and they whoosh past (Whoosh.tsx); stay put
+// and they hit, hard (Burst.tsx), and stay a while: cream and snow on the
+// face itself (FaceMess.tsx), the rest on the filtered head (Stuck.tsx;
+// FilteredHead.tsx is the SDK's canonical head fit through a spring, with
+// the depth-only head occluder in the same group), until they slide off,
+// melt or pop off. Tap the screen to throw a pie yourself. Throws fly in
+// world space (Projectiles.tsx) and draw over everything. A wordless hint
+// shows how to dodge until you first do (Hint.tsx).
+import { Suspense, useEffect, useRef } from "react";
 import { useFrame, useThree } from "@react-three/fiber";
 import { PMREMGenerator, type Mesh } from "three";
 // eslint-disable-next-line import/extensions
@@ -17,8 +20,10 @@ import { FACE_FPS, FilteredHead } from "./FilteredHead";
 import { live } from "./live";
 import { Projectiles } from "./Projectiles";
 import { Burst } from "./Burst";
-import { Dollops, Drips, FaceMess } from "./FaceMess";
+import { Dollops, FaceMess, OnFace } from "./FaceMess";
+import { Hint } from "./Hint";
 import { Stuck } from "./Stuck";
+import { Whoosh } from "./Whoosh";
 
 /** The blendshapes the pieces' face_triggers read (see rig.ts). */
 const FACE_INPUTS = [
@@ -109,19 +114,53 @@ const Director = () => {
   return null;
 };
 
+/**
+ * Tap the picture to throw a pie at the face from there, so whoever holds
+ * the phone can play the thrower. (Taps on controls over it don't count.)
+ */
+const TapToThrow = () => {
+  const canvas = useThree((st) => st.gl.domElement);
+  useEffect(() => {
+    const onDown = (e: PointerEvent) => {
+      const r = canvas.getBoundingClientRect();
+      director.tap([
+        ((e.clientX - r.left) / r.width) * 2 - 1,
+        -(((e.clientY - r.top) / r.height) * 2 - 1),
+      ]);
+    };
+    canvas.addEventListener("pointerdown", onDown);
+    return () => canvas.removeEventListener("pointerdown", onDown);
+  }, [canvas]);
+  return null;
+};
+
 export const SplatScene = () => {
   useStudioLight();
   return (
     <>
       <FaceSignals />
-      <FilteredHead onFace={<FaceMess />}>
+      <FilteredHead
+        onFace={
+          <>
+            <FaceMess />
+            <OnFace />
+          </>
+        }
+      >
         <Stuck />
         <Dollops />
       </FilteredHead>
       <DepthClear />
-      <Projectiles onLand={(kind, where) => director.land(kind, where)} />
+      <Projectiles
+        onLand={(kind, where) => director.land(kind, where)}
+        onMiss={(kind, verdict) => director.miss(kind, verdict)}
+      />
       <Burst />
-      <Drips />
+      <Whoosh />
+      <TapToThrow />
+      <Suspense fallback={null}>
+        <Hint />
+      </Suspense>
       <Director />
     </>
   );

@@ -30,7 +30,16 @@ import {
 import { clone as cloneSkinned } from "three/examples/jsm/utils/SkeletonUtils.js";
 import { useXRAsset } from "@vincentt-xr/sdk";
 
-import { arcAt, HIT_FRONT, planThrow, type Throw } from "./flight";
+import {
+  arcAt,
+  HIT_FRONT,
+  judge,
+  planThrow,
+  type Throw,
+  type ThrowOptions,
+  type Verdict,
+} from "./flight";
+import { whoosh } from "./Whoosh";
 import { buildDart, buildPie, buildSnowball, onTop } from "./flyers";
 import { live } from "./live";
 import { assetFor } from "./Part";
@@ -43,20 +52,22 @@ const TRAIL = 12;
 /** Trail draw order: after the depth clear, under the projectiles. */
 const TRAIL_ORDER = 905;
 
-type Launch = {
+export type Launch = ThrowOptions & {
   kind: Kind;
   /** Follows the face all the way, so it always hits (dev). */
   homing?: boolean;
-  /** Seconds from the throw to the face (else a little random). */
-  duration?: number;
+  /** Aimed this far off the face (cm: sideways, up), to check misses (dev). */
+  offset?: [number, number];
 };
 
-/** A throw hits if it arrives this close to its point on the face (cm). */
-const HIT_RADIUS = 6.5;
-/** A dodged throw drops away for this long (s), shrinking to nothing. */
-const DROP = 0.45;
-/** Its fall (world units per s², in cm per head-cm). */
-const GRAVITY = 900;
+/** A dodged throw flies on past your head for this long (s), then is gone. */
+const PAST = 0.9;
+/** Its fall (cm/s², in head centimetres). */
+const GRAVITY = 380;
+/** How fast it flies on past you, sideways (cm/s). */
+const PAST_SPEED = 38;
+/** It never goes behind your face: it stays this far in front (cm). */
+const IN_FRONT = 6;
 
 /** Projectiles waiting to fly; Projectiles takes them each frame. */
 const queue: Launch[] = [];
@@ -157,9 +168,13 @@ type Slot = {
   kind: Kind;
   homing: boolean;
   t0: number;
-  /** Dodged: when it started dropping (s), its velocity (world/s); −1 = flying. */
+  /** Dodged: when it started flying on past (s), its velocity (world/s); −1 = flying. */
   dropped: number;
   fall: Vector3;
+  /** A near miss: it wobbles as it passes. */
+  near: boolean;
+  /** Where your face was when it went past (world), to stay in front of it. */
+  faceZ: number;
   axis: Vector3;
   phase: number;
 };
@@ -209,6 +224,7 @@ const fishFlyer = (
 
 const end = new Vector3();
 const lift = new Vector3();
+const off = new Vector3();
 const fromArr = [0, 0, 0];
 const endArr = [0, 0, 0];
 const liftArr = [0, 0, 0];
@@ -233,9 +249,12 @@ export const aimPoint = (kind: Kind, out: Vector3) => {
 
 export const Projectiles = ({
   onLand,
+  onMiss,
 }: {
   /** A hit arrived (where, in world space): the prop sticks. */
   onLand: (kind: Kind, where: Vector3) => void;
+  /** Dodged: a near miss or a clear one. */
+  onMiss: (kind: Kind, verdict: Verdict) => void;
 }) => {
   const size = useThree((s) => s.size);
   const dpr = useThree((s) => s.viewport.dpr);
@@ -245,6 +264,8 @@ export const Projectiles = ({
   const mixers = useRef<AnimationMixer[]>([]);
   const land = useRef(onLand);
   land.current = onLand;
+  const missed = useRef(onMiss);
+  missed.current = onMiss;
 
   const slots = useMemo<Slot[] | null>(() => {
     if (!dartGltf || !fishGltf) return null;
@@ -273,6 +294,8 @@ export const Projectiles = ({
         to: new Vector3(),
         dropped: -1,
         fall: new Vector3(),
+        near: false,
+        faceZ: 0,
         kind: "pie" as Kind,
         homing: false,
         t0: 0,
@@ -301,12 +324,13 @@ export const Projectiles = ({
       const free = slots.find((s) => !s.flight);
       if (!free) break;
       const l = queue.shift() as Launch;
-      const plan = planThrow(Math.random, l.duration);
+      const plan = planThrow(Math.random, l);
       free.flight = plan;
       free.kind = l.kind;
       free.homing = !!l.homing;
       free.t0 = now;
       free.dropped = -1;
+      free.near = false;
       free.filled = 0;
       free.axis.randomDirection();
       free.phase = Math.random() * Math.PI * 2;
@@ -316,6 +340,10 @@ export const Projectiles = ({
       free.to.x += plan.scatter[0] * sc;
       free.to.y += plan.scatter[1] * sc;
       free.to.z += HIT_FRONT * sc;
+      if (l.offset) {
+        free.to.x += l.offset[0] * sc;
+        free.to.y += l.offset[1] * sc;
+      }
       // Past the screen edge, near the camera: on the ray through that edge
       // point, a share of the way to the face.
       free.from
@@ -354,29 +382,35 @@ export const Projectiles = ({
         // Arrived: is the face still there?
         aimPoint(slot.kind, end);
         end.z += HIT_FRONT * s;
-        if (slot.homing || end.distanceTo(slot.to) < HIT_RADIUS * s) {
+        const verdict = slot.homing
+          ? "hit"
+          : judge(end.distanceTo(slot.to) / s);
+        if (verdict === "hit") {
           slot.flight = null;
           group.visible = false;
           trail.visible = false;
           land.current(slot.kind, slot.to);
           return;
         }
-        // Dodged: it barely carries on, and drops away in front of you.
+        // Dodged: it flies on past your head, away from it, still in front
+        // of you, and falls away with a spin.
         slot.dropped = now;
-        lift.set(0, f.arc * s, 0);
-        const a = slot.from.toArray(fromArr);
-        const b = slot.to.toArray(endArr);
-        const l = lift.toArray(liftArr);
-        arcAt(a, b, l, 1, at);
-        arcAt(a, b, l, 0.98, next0);
-        slot.fall
-          .set(at[0] - next0[0], at[1] - next0[1], at[2] - next0[2])
-          .multiplyScalar(0.2 / (0.02 * f.duration));
+        slot.near = verdict === "near";
+        slot.faceZ = end.z + IN_FRONT * s;
+        off.copy(slot.to).sub(end);
+        off.z = 0;
+        if (off.lengthSq() < 1e-9) off.set(Math.random() - 0.5, 0, 0);
+        off.normalize();
+        slot.fall.copy(off).multiplyScalar(PAST_SPEED * s);
+        slot.fall.y += 25 * s;
+        if (slot.near) whoosh(slot.to, end, s);
+        missed.current(slot.kind, verdict);
       }
       let shrink = 1;
+      let spinMore = 0;
       if (slot.dropped >= 0) {
         const t = now - slot.dropped;
-        if (t >= DROP) {
+        if (t >= PAST) {
           slot.flight = null;
           group.visible = false;
           trail.visible = false;
@@ -384,8 +418,10 @@ export const Projectiles = ({
         }
         slot.fall.y -= GRAVITY * s * dt;
         group.position.addScaledVector(slot.fall, dt);
+        group.position.z = Math.max(group.position.z, slot.faceZ);
         vel.copy(slot.fall).normalize();
-        shrink = 1 - (t / DROP) ** 2;
+        shrink = 1 - Math.max(0, (t - PAST * 0.5) / (PAST * 0.5)) ** 2;
+        spinMore = t * 7;
       } else {
         lift.set(0, f.arc * s, 0);
         const a = slot.from.toArray(fromArr);
@@ -408,9 +444,16 @@ export const Projectiles = ({
       else q.setFromUnitVectors(FORWARD, vel);
       q.multiply(tumble.setFromAxisAngle(SIDE, look.lean));
       const t = now - slot.t0;
+      // A near miss wobbles hard for a moment as it shoots past.
+      const shake =
+        slot.near && slot.dropped >= 0
+          ? 0.5 *
+            Math.sin((now - slot.dropped) * 40) *
+            Math.exp(-(now - slot.dropped) * 6)
+          : 0;
       tumble.setFromAxisAngle(
         slot.axis,
-        Math.sin(t * 3 + slot.phase) * look.wobble,
+        Math.sin(t * 3 + slot.phase) * look.wobble + shake + spinMore,
       );
       q.multiply(tumble);
       tumble.setFromAxisAngle(FORWARD, t * look.spin + slot.phase);

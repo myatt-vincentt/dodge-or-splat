@@ -14,7 +14,7 @@
 // Neither layer is drawn while its hit is off, so the face is untouched
 // before a hit and after it clears.
 import { useCallback, useMemo, useRef } from "react";
-import { useFrame } from "@react-three/fiber";
+import { createPortal, useFrame } from "@react-three/fiber";
 import {
   Matrix4,
   MeshStandardMaterial,
@@ -30,11 +30,11 @@ import {
   MAKEUP_BLENDING,
   MAKEUP_RENDER_ORDER,
   type FaceAtlasMaterialContext,
+  useFaceAtlasSurface,
   type FaceLiquifyCustomWarps,
 } from "@vincentt-xr/sdk/face-effects";
 
 import { ageOf, useOnFace } from "./hits";
-import { live } from "./live";
 
 const vertexShader = /* glsl */ `
   attribute vec3 restPosition;
@@ -102,9 +102,20 @@ const creamShader = /* glsl */ `
     vec2 d = q - vec2(0.0, 0.5);
     float ry = d.y < 0.0 ? 10.4 : 8.4;
     float r = length(vec2(d.x / 6.4, d.y / ry));
-    r += (fbm(q * 0.26 + uSeed) - 0.5) * 0.5;
+    // Big irregular lobes round the outline (by angle), so no two sides
+    // match.
+    float ang = atan(d.y, d.x);
+    r += (noise(vec2(ang * 1.6 + uSeed, uSeed)) - 0.5) * 0.5;
+    r += (fbm(q * 0.26 + uSeed) - 0.5) * 0.4;
     // Small lumps all along the outline.
-    r += (noise(q * 1.25 + uSeed * 2.0) - 0.5) * 0.2;
+    r += (noise(q * 1.25 + uSeed * 2.0) - 0.5) * 0.22;
+    // Gaps at the temples and along the jaw, where the cream missed.
+    vec2 tl = vec2(abs(q.x) - 6.2, q.y - 4.5);
+    vec2 jw = vec2(abs(q.x) - 5.0, q.y + 7.5);
+    float gap = max(
+      1.0 - length(tl / vec2(1.8, 2.6)) + (noise(q * 0.9 + uSeed) - 0.5),
+      1.0 - length(jw / vec2(2.0, 1.6)) + (noise(q * 0.9 - uSeed) - 0.5));
+    r += max(gap, 0.0) * 0.9;
     return r;
   }
 
@@ -123,11 +134,14 @@ const creamShader = /* glsl */ `
     float len = uDrip * (1.5 + 7.0 * col);
     float rd = field(q + vec2(0.0, len * dm));
     float drip = (1.0 - smoothstep(uSpread - 0.1, uSpread + 0.02, rd)) * dm;
-    drip *= step(p.y, 1.0);
-    // How thick it is here: full in the middle, thin at the edge and drips.
+    drip *= smoothstep(3.0, -1.0, p.y);
+    // How thick it is here: thin at the edge and drips, and piled up
+    // unevenly in the middle.
     float thick = 1.0 - smoothstep(uSpread - 0.5, uSpread - 0.05, r);
+    float pile = fbm(q * 0.18 + uSeed * 1.7);
+    thick *= 0.55 + 0.9 * pile;
     float cover = max(body, max(blob * 0.9, drip * 0.85));
-    float alpha = cover * mix(0.5, 1.0, max(thick, blob * 0.6));
+    float alpha = cover * mix(0.5, 1.0, clamp(max(thick, blob * 0.6), 0.0, 1.0));
     // Thinning from the top as it clears: a soft front moving down.
     float front = 14.0 - 27.0 * uThin * uThin;
     alpha *= smoothstep(front + 4.0, front - 2.0, p.y);
@@ -145,11 +159,14 @@ const creamShader = /* glsl */ `
     vec3 l = normalize(vec3(-0.25, 0.5, 0.85));
     vec3 v = normalize(vView);
     vec3 hv = normalize(l + v);
-    float diff = 0.6 + 0.45 * max(dot(n, l), 0.0);
+    float diff = 0.55 + 0.5 * max(dot(n, l), 0.0);
     float spec = pow(max(dot(n, hv), 0.0), 70.0) * 0.9;
     spec += pow(max(dot(n, hv), 0.0), 8.0) * 0.1;
-    vec3 base = vec3(0.97, 0.92, 0.83);
-    vec3 col3 = base * diff * (0.82 + 0.18 * thick) + spec * min(1.0, alpha * 1.4);
+    // Piled-up cream sits in its own soft shade at the dips between heaps.
+    float heap = smoothstep(0.25, 0.75, pile);
+    vec3 base = mix(vec3(0.9, 0.84, 0.74), vec3(0.99, 0.95, 0.87), heap);
+    vec3 col3 = base * diff * (0.78 + 0.22 * clamp(thick, 0.0, 1.0));
+    col3 += spec * min(1.0, alpha * 1.4) * (0.6 + 0.4 * heap);
     float a = alpha * uPresence;
     gl_FragColor = vec4(linearToOutputTexel(vec4(col3, 1.0)).rgb * a, a);
   }
@@ -354,10 +371,8 @@ export const FaceMess = () => {
   );
 };
 
-/** Dollops left behind: cheeks and hair (canonical cm, radius cm). */
+/** Dollops left in the hair (canonical cm, radius cm). */
 const DOLLOPS: [number, number, number, number][] = [
-  [-6.2, -2.2, 3.0, 0.9],
-  [6.4, -3.2, 2.4, 0.7],
   [-4.5, 11.6, 2.6, 1.1],
   [3.2, 12.8, 1.4, 0.9],
 ];
@@ -365,9 +380,8 @@ const DOLLOPS: [number, number, number, number][] = [
 const cream = new MeshStandardMaterial({ color: "#f3e6cf", roughness: 0.14 });
 
 /**
- * The pie's leftovers on the head (inside FilteredHead, canonical cm): a
- * few glossy dollops on the cheeks and in the hair, shrinking away as the
- * cream melts.
+ * The pie's leftovers in the hair (inside FilteredHead, canonical cm): a
+ * few glossy dollops, shrinking away as the cream clears.
  */
 export const Dollops = () => {
   const on = useOnFace();
@@ -408,40 +422,54 @@ export const Dollops = () => {
   );
 };
 
-/** Drips at once, and how often one falls (s). */
-const DRIPS = 6;
-const DRIP_EVERY = 0.45;
-const DRIP_FALL = 0.9;
-/** The bottom of the chin (canonical cm). */
-const CHIN = new Vector3(0, -10.4, 3.4);
-const tmp = new Vector3();
 const mat = new Matrix4();
 
+/** Drips at once, and how often one starts. */
+const DRIPS = 6;
+const DRIP_EVERY = 0.45;
+/** Seconds a drop hangs from the chin, then falls (fast) and is gone. */
+const DRIP_HANG = 0.55;
+const DRIP_FALL = 0.22;
+/** Face landmarks along the bottom of the chin and jaw, where drops hang. */
+const CHIN_MARKS = [152, 148, 377, 176, 400, 149, 378];
+/** Cheek landmarks (each side) for the dollops left on the cheeks. */
+const CHEEK_MARKS: [number, number][] = [
+  [205, 0.9],
+  [425, 0.75],
+];
+const cheekCream = new MeshStandardMaterial({
+  color: "#f3e6cf",
+  roughness: 0.14,
+});
+
 /**
- * Cream dripping off the chin while the pie slides (world space, drawn
- * over everything): a drop gathers under the chin, stretches, and falls.
+ * On the live face mesh itself (the face layer's own pose group, canonical
+ * cm), so they sit exactly on the cream: drops hanging from the chin and
+ * jaw — swelling and stretching, then letting go to fall fast and vanish —
+ * and the dollops left on the cheeks.
  */
-export const Drips = () => {
+export const OnFace = () => {
+  const handle = useFaceAtlasSurface();
   const on = useOnFace();
   const mesh = useRef<InstancedMesh>(null);
+  const cheeks = useRef<Group>(null);
   const drops = useMemo(
     () =>
       Array.from({ length: DRIPS }, () => ({
         t0: -1,
-        x: 0,
-        start: new Vector3(),
-        s: 1,
+        mark: 152,
+        at: new Vector3(),
       })),
     [],
   );
   const last = useRef(-1);
   useFrame(() => {
     const m = mesh.current;
-    if (!m) return;
+    if (!m || !handle) return;
+    const points = handle.geometry.getAttribute("position");
     const now = performance.now() / 1000;
     const h = on.pie;
     const t = h ? ageOf(h) : Infinity;
-    const { head } = live;
     if (
       h &&
       t > PIE.drops[0] &&
@@ -451,50 +479,71 @@ export const Drips = () => {
       last.current = now;
       const d = drops.reduce((a, b) => (b.t0 < a.t0 ? b : a));
       d.t0 = now;
-      d.x = (Math.random() - 0.5) * 3.5;
-      d.s = head.scale;
-      tmp.set(CHIN.x + d.x, CHIN.y, CHIN.z);
-      d.start
-        .copy(tmp)
-        .applyQuaternion(head.quaternion)
-        .multiplyScalar(head.scale)
-        .add(head.position);
+      d.mark = CHIN_MARKS[Math.floor(Math.random() * CHIN_MARKS.length)];
     }
     drops.forEach((d, i) => {
       const a = d.t0 < 0 ? Infinity : now - d.t0;
-      if (a > DRIP_FALL) {
+      if (!h || a > DRIP_HANG + DRIP_FALL) {
         mat.makeScale(0, 0, 0);
-      } else {
-        // Gathers (first third), then falls and stretches.
-        const gather = clamp01(a / 0.3);
-        const fall = Math.max(0, a - 0.3);
-        const r =
-          d.s * (0.5 + 0.5 * easeOut(gather)) * (1 - clamp01((a - 0.7) / 0.2));
-        mat.makeScale(r, r * (1.3 + 3 * fall), r);
-        mat.setPosition(
-          d.start.x,
-          d.start.y - d.s * (0.6 + 420 * fall * fall),
-          d.start.z,
-        );
+        m.setMatrixAt(i, mat);
+        return;
       }
+      // Hangs from its point on the chin while it swells and stretches.
+      if (a <= DRIP_HANG) d.at.fromBufferAttribute(points, d.mark);
+      const hang = clamp01(a / DRIP_HANG);
+      const fall = Math.max(0, a - DRIP_HANG);
+      const r = (0.22 + 0.22 * easeOut(hang)) * (1 - clamp01(fall / DRIP_FALL));
+      const stretch = 1.4 + 1.4 * hang + 6 * fall;
+      mat.makeScale(r, r * stretch, r);
+      mat.setPosition(
+        d.at.x,
+        d.at.y - r * stretch * 0.75 - 900 * fall * fall,
+        d.at.z + 0.2,
+      );
       m.setMatrixAt(i, mat);
     });
     m.instanceMatrix.needsUpdate = true;
+
+    // The cheek dollops ride their cheek points, shrinking as it clears.
+    const g = cheeks.current;
+    if (!g) return;
+    const grow = phase(t, 0.02, 0.18);
+    const gone = phase(t, PIE.thin[1] - 0.9, PIE.thin[1]);
+    g.visible = !!h && gone < 1;
+    g.children.forEach((c, i) => {
+      const [mark, size] = CHEEK_MARKS[i];
+      c.position.fromBufferAttribute(points, mark);
+      const r = size * grow * (1 - gone);
+      c.scale.set(r, r * 0.62, r * 0.8);
+      // eslint-disable-next-line no-param-reassign -- this dollop's own mesh
+      c.position.z += 0.4;
+    });
   });
-  return (
-    <instancedMesh
-      ref={mesh}
-      args={[undefined, undefined, DRIPS]}
-      frustumCulled={false}
-      renderOrder={906}
-    >
-      <sphereGeometry args={[1, 14, 10]} />
-      <meshStandardMaterial
-        color="#f3e6cf"
-        roughness={0.14}
-        transparent
-        depthWrite
-      />
-    </instancedMesh>
+  if (!handle) return null;
+  return createPortal(
+    <>
+      <instancedMesh
+        ref={mesh}
+        args={[undefined, undefined, DRIPS]}
+        frustumCulled={false}
+        renderOrder={906}
+      >
+        <sphereGeometry args={[1, 14, 10]} />
+        <meshStandardMaterial
+          color="#f3e6cf"
+          roughness={0.14}
+          transparent
+          depthWrite
+        />
+      </instancedMesh>
+      <group ref={cheeks}>
+        {CHEEK_MARKS.map(([mark]) => (
+          <mesh key={mark} material={cheekCream} renderOrder={5}>
+            <sphereGeometry args={[1, 18, 12]} />
+          </mesh>
+        ))}
+      </group>
+    </>,
+    handle.group,
   );
 };

@@ -42,20 +42,30 @@ const EDGES: { w: number; at: (r: number) => [number, number] }[] = [
 const TOTAL = EDGES.reduce((a, e) => a + e.w, 0);
 
 /** How far off the aim point a throw may land (cm). */
-export const SCATTER = 3;
+export const SCATTER = 2;
+
+export type ThrowOptions = {
+  /** Seconds from the throw to the face (else a little random). */
+  duration?: number;
+  /** Only from this side of the screen: −1 left, +1 right. */
+  side?: -1 | 1;
+  /** From exactly here instead (NDC), e.g. where the screen was tapped. */
+  from?: [number, number];
+};
 
 export const planThrow = (
   random: Random = Math.random,
-  duration?: number,
+  { duration, side, from }: ThrowOptions = {},
 ): Throw => {
   let pick = random() * TOTAL;
   const edge = EDGES.find((e) => {
     pick -= e.w;
     return pick < 0;
   }) as (typeof EDGES)[number];
-  const at = edge.at(random());
+  const at = from ? [...from] : edge.at(random());
+  if (side && !from && Math.sign(at[0]) !== side) at[0] = -at[0];
   return {
-    edge: at,
+    edge: at as [number, number],
     near: 0.55 + random() * 0.1,
     scatter: [(random() - 0.5) * 2 * SCATTER, (random() - 0.5) * 2 * SCATTER],
     duration: duration ?? 0.9 + random() * 0.35,
@@ -84,3 +94,40 @@ export const arcAt = (
   }
   return out;
 };
+
+/** A throw hits within this distance of its point on the face (cm). */
+export const HIT_RADIUS = 5;
+/** A miss within this distance is a near miss: a whoosh past the face (cm). */
+export const NEAR_RADIUS = 14;
+
+export type Verdict = "hit" | "near" | "miss";
+
+/**
+ * How far the face's point ended up from where the throw was aimed (cm):
+ * a lean or a step dodges, a wobble does not.
+ */
+export const judge = (cm: number): Verdict => {
+  if (cm < HIT_RADIUS) return "hit";
+  return cm < NEAR_RADIUS ? "near" : "miss";
+};
+
+/** The tempo builds over this many seconds of play. */
+export const RAMP = 40;
+/** Seconds between throws at the start, and once it has built up. */
+export const GAP: [number, number] = [1.8, 0.8];
+
+const smooth = (t: number) => {
+  const k = Math.min(1, Math.max(0, t));
+  return k * k * (3 - 2 * k);
+};
+
+/** Seconds to the next throw, after `t` seconds of play. */
+export const gapAt = (t: number) =>
+  GAP[0] + (GAP[1] - GAP[0]) * smooth(t / RAMP);
+
+/** The chance a throw comes with a second one from the other side. */
+export const pairChanceAt = (t: number) =>
+  0.35 * smooth((t - 12) / (RAMP - 12));
+
+/** Hits in a row before a breather, and how long the breather is (s). */
+export const BREATHER = { after: 3, seconds: 3 };
