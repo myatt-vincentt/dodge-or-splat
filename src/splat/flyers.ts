@@ -11,6 +11,8 @@ import {
   Mesh,
   MeshStandardMaterial,
   SphereGeometry,
+  TubeGeometry,
+  Curve,
   Vector2,
   Vector3,
   type Material,
@@ -69,34 +71,69 @@ export const buildTin = () =>
     Object.assign(standard("#c9ced6", 0.32, 0.85), { side: DoubleSide }),
   );
 
-/** A cream pie: foil tin, cream dome, dollops, a cherry. */
+/** A soft rope of whipped cream piped round and up into a peak. */
+class Swirl extends Curve<Vector3> {
+  public constructor() {
+    super();
+  }
+
+  // eslint-disable-next-line class-methods-use-this
+  getPoint(t: number, out = new Vector3()) {
+    const turns = 2.6;
+    const a = t * turns * Math.PI * 2;
+    const r = 7.2 * (1 - t) ** 0.8 + 0.4;
+    return out.set(Math.cos(a) * r, 3.4 + t * 5.2, Math.sin(a) * r);
+  }
+}
+
+/**
+ * A cream pie, built with the cream up (+Y) and turned so the cream faces
+ * +Z: foil tin, a cream bed, a piped whipped-cream swirl with ridges, a
+ * ring of rosettes and a glossy cherry on top.
+ */
 export const buildPie = () => {
   const pie = new Group();
   const body = new Group();
-  // Built with the cream up (+Y), then turned so the cream leads (+Z).
   body.rotation.x = Math.PI / 2;
   pie.add(body);
   body.add(buildTin());
-  const cream = standard("#fff8ec", 0.55);
-  const dome = new Mesh(new SphereGeometry(1, 36, 18), cream);
-  dome.scale.set(10.7, 2.6, 10.7);
-  dome.position.y = 2.6;
-  body.add(dome);
-  const dollop = new SphereGeometry(1, 18, 12);
-  for (let i = 0; i < 9; i += 1) {
-    const a = (i / 9) * Math.PI * 2;
-    const d = new Mesh(dollop, cream);
-    d.scale.set(1.9, 1.5, 1.9);
-    d.position.set(Math.cos(a) * 8.2, 4.1, Math.sin(a) * 8.2);
+  const cream = standard("#f7eedf", 0.32);
+  const bed = new Mesh(new SphereGeometry(1, 36, 18), cream);
+  bed.scale.set(10.8, 1.6, 10.8);
+  bed.position.y = 2.7;
+  body.add(bed);
+  // The piped swirl: a fat tube whose thickness pulses, so it looks ridged.
+  const path = new Swirl();
+  const swirl = new TubeGeometry(path, 220, 1.9, 10, false);
+  const pos = swirl.getAttribute("position");
+  const v = new Vector3();
+  const axis = new Vector3();
+  for (let k = 0; k < pos.count; k += 1) {
+    v.fromBufferAttribute(pos, k);
+    const along = Math.floor(k / 11) / 220;
+    const c = path.getPoint(along);
+    axis.copy(v).sub(c);
+    // Ridges round the rope, and a little taper at its tip.
+    const ridge = 1 + 0.18 * Math.cos(Math.atan2(axis.y, axis.x) * 6);
+    axis.multiplyScalar(ridge * (1 - 0.55 * along ** 3));
+    v.copy(c).add(axis);
+    pos.setXYZ(k, v.x, v.y, v.z);
+  }
+  swirl.computeVertexNormals();
+  body.add(new Mesh(swirl, cream));
+  const rosette = new SphereGeometry(1, 16, 10);
+  for (let k = 0; k < 10; k += 1) {
+    const a = (k / 10) * Math.PI * 2;
+    const d = new Mesh(rosette, cream);
+    d.scale.set(1.6, 1.3, 1.6);
+    d.position.set(Math.cos(a) * 9.4, 3.6, Math.sin(a) * 9.4);
     body.add(d);
   }
-  const top = new Mesh(dollop, cream);
-  top.scale.set(2.8, 2.2, 2.8);
-  top.position.y = 5.4;
-  body.add(top);
-  const cherry = new Mesh(dollop, standard("#e2263a", 0.25));
-  cherry.scale.setScalar(1.3);
-  cherry.position.y = 8.2;
+  const cherry = new Mesh(
+    new SphereGeometry(1.6, 20, 14),
+    standard("#d81f35", 0.15),
+  );
+  cherry.position.y = 9.8;
   body.add(cherry);
   return onTop(pie);
 };

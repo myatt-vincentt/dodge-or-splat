@@ -16,6 +16,7 @@ import {
   Color,
   DynamicDrawUsage,
   Group,
+  IcosahedronGeometry,
   InstancedMesh,
   Matrix4,
   Mesh,
@@ -37,8 +38,15 @@ import type { Kind } from "./props";
 const POOL = 3;
 const BLOBS = 32;
 const POWDER = 90;
-/** Draw order: over the projectiles. */
-const ORDER = 930;
+/**
+ * Draw order: over the projectiles, and after the face squash
+ * (FaceLiquify, 998), so the squash never smears the burst.
+ */
+const ORDER = 998.2;
+/** The tin's size: the thrown pie's, as it arrives. */
+const TIN = 0.36;
+/** Flecks in the splat ring at the moment of impact. */
+const FLECKS = 30;
 
 type Style = {
   /** Blobs: count, size range (cm), speed range (cm/s), how much toward the camera. */
@@ -59,10 +67,10 @@ type Style = {
 const STYLE: Record<Kind, Style> = {
   pie: {
     blobs: 32,
-    size: [0.7, 2],
+    size: [0.35, 2.4],
     speed: [40, 100],
-    toward: 0.9,
-    colors: ["#f6ead6", "#fbf3e6", "#ecdcc2"],
+    toward: 0.6,
+    colors: ["#f2e6d2", "#f8efe1", "#e8d8bf"],
     look: "cream",
     life: 0.9,
     powder: 0,
@@ -154,6 +162,9 @@ type One = {
   dust: Particle[];
   tinV: Vector3;
   tinSpin: Vector3;
+  /** The splat ring: flecks round the impact, in the plane facing you. */
+  flecks: InstancedMesh;
+  fleckAt: { a: number; r: number; size: number }[];
 };
 
 const m4 = new Matrix4();
@@ -162,9 +173,27 @@ const scl = new Vector3();
 const turn = new Quaternion();
 const col = new Color();
 const ax = new Vector3();
+const right = new Vector3();
+const up = new Vector3();
+const spin = new Quaternion();
+
+/** A round but irregular blob, the same for every splatter drop. */
+const lumpy = () => {
+  const g = new IcosahedronGeometry(1, 2);
+  const at = g.getAttribute("position");
+  const v = new Vector3();
+  for (let i = 0; i < at.count; i += 1) {
+    v.fromBufferAttribute(at, i);
+    const n = Math.sin(v.x * 3.1 + v.y * 1.7) * Math.cos(v.z * 2.3 - v.x * 1.1);
+    v.multiplyScalar(1 + 0.14 * n);
+    at.setXYZ(i, v.x, v.y, v.z);
+  }
+  g.computeVertexNormals();
+  return g;
+};
 
 const materials = () => {
-  const cream = new MeshStandardMaterial({ color: "#ffffff", roughness: 0.18 });
+  const cream = new MeshStandardMaterial({ color: "#ffffff", roughness: 0.34 });
   const water = new MeshStandardMaterial({
     color: "#ffffff",
     roughness: 0.05,
@@ -191,7 +220,8 @@ export const Burst = () => {
   const looks = useMemo(materials, []);
 
   const pool = useMemo<One[]>(() => {
-    const blobGeo = new SphereGeometry(1, 14, 10);
+    const blobGeo = lumpy();
+    const fleckGeo = new SphereGeometry(1, 10, 6);
     return Array.from({ length: POOL }, () => {
       const group = new Group();
       group.visible = false;
@@ -238,7 +268,15 @@ export const Burst = () => {
       const tin = new Group();
       tin.add(buildTin());
       onTop(tin);
-      [flash, blobs, powder, tin].forEach((o) => {
+      tin.traverse((o) => {
+        // After the face squash too.
+        // eslint-disable-next-line no-param-reassign
+        o.renderOrder = ORDER - 0.1;
+      });
+      const flecks = new InstancedMesh(fleckGeo, looks.cream, FLECKS);
+      flecks.instanceMatrix.setUsage(DynamicDrawUsage);
+      flecks.renderOrder = ORDER + 1;
+      [flash, blobs, powder, tin, flecks].forEach((o) => {
         // eslint-disable-next-line no-param-reassign
         o.frustumCulled = false;
         group.add(o);
@@ -264,6 +302,12 @@ export const Burst = () => {
         })),
         tinV: new Vector3(),
         tinSpin: new Vector3(),
+        flecks,
+        fleckAt: Array.from({ length: FLECKS }, () => ({
+          a: 0,
+          r: 0,
+          size: 0,
+        })),
       };
     });
   }, [looks]);
@@ -293,9 +337,10 @@ export const Burst = () => {
           .multiplyScalar(
             st.speed[0] + Math.random() * (st.speed[1] - st.speed[0]),
           );
+        // Lots of small ones, a few big.
         p.size =
           i < st.blobs
-            ? st.size[0] + Math.random() * (st.size[1] - st.size[0])
+            ? st.size[0] + Math.random() ** 3 * (st.size[1] - st.size[0])
             : 0;
         p.spin = Math.random();
         one.blobs.setColorAt(i, col.set(st.colors[i % st.colors.length]));
@@ -309,6 +354,14 @@ export const Burst = () => {
           .multiplyScalar(15 + Math.random() * 55);
         p.size = i < st.powder ? 2 + Math.random() * 4 : 0;
       });
+      // The splat ring: flecks thrown out round the impact (cream only).
+      one.fleckAt.forEach((f, i) => {
+        f.a = (i / FLECKS) * Math.PI * 2 + (Math.random() - 0.5) * 0.25;
+        f.r = 0.75 + Math.random() * 0.5;
+        f.size = st.tin ? 0.25 + Math.random() ** 2 * 0.6 : 0;
+        one.flecks.setColorAt(i, col.set(st.colors[i % st.colors.length]));
+      });
+      if (one.flecks.instanceColor) one.flecks.instanceColor.needsUpdate = true;
       // The tin comes off the face and drops away, turning over.
       one.tin.visible = st.tin;
       one.tin.position.set(0, 0, 0);
@@ -350,14 +403,40 @@ export const Burst = () => {
         pos.copy(p.v).multiplyScalar(st.life * fly * 0.6);
         pos.y -= 60 * t * t;
         pos.multiplyScalar(s);
-        const grow = 1;
-        const r = p.size * s * grow * (1 - k ** 3);
-        // Cream and water stretch a little along their flight.
-        scl.set(r, r, r * (st.look === "spark" ? 3 : 1.25));
+        const r = p.size * s * (1 - k ** 3);
+        // Squashed flat as they leave, then a slight stretch along their
+        // flight (sparks streak).
+        const along = st.look === "spark" ? 3 : 0.55 + 0.65 * fly;
+        scl.set(r * (1.25 - 0.2 * fly), r * (1.25 - 0.2 * fly), r * along);
         turn.setFromUnitVectors(ax.set(0, 0, 1), pos.clone().normalize());
         one.blobs.setMatrixAt(i, m4.compose(pos, turn, scl));
       });
       one.blobs.instanceMatrix.needsUpdate = true;
+
+      // The ring spreads fast across the face and shrinks away.
+      const kr = Math.min(1, t / 0.35);
+      const ring = easeOut(kr);
+      right.set(1, 0, 0).applyQuaternion(camera.quaternion);
+      up.set(0, 1, 0).applyQuaternion(camera.quaternion);
+      one.fleckAt.forEach((f, i) => {
+        if (f.size === 0 || kr >= 1) {
+          one.flecks.setMatrixAt(i, m4.makeScale(0, 0, 0));
+          return;
+        }
+        const d = (2 + 13 * ring) * f.r * s;
+        pos
+          .copy(right)
+          .multiplyScalar(Math.cos(f.a) * d)
+          .addScaledVector(up, Math.sin(f.a) * d * 0.85);
+        const r = f.size * s * (1 - kr ** 2);
+        // Flat drops, drawn out round the ring.
+        scl.set(r * 1.6, r, r * 0.5);
+        turn
+          .copy(camera.quaternion)
+          .multiply(spin.setFromAxisAngle(ax.set(0, 0, 1), f.a));
+        one.flecks.setMatrixAt(i, m4.compose(pos, turn, scl));
+      });
+      one.flecks.instanceMatrix.needsUpdate = true;
 
       // Powder: soft white puffs drifting out and fading.
       const pa = one.powder.geometry.getAttribute(
@@ -392,7 +471,7 @@ export const Burst = () => {
           one.tinSpin.z * tt,
         );
         one.tin.scale.setScalar(
-          s * (t > 1.1 ? 1 - easeOut((t - 1.1) / 0.3) : 1),
+          s * TIN * (t > 1.1 ? 1 - easeOut((t - 1.1) / 0.3) : 1),
         );
       }
     });

@@ -11,13 +11,20 @@
 // middle of the skull so pieces that would share a spot spread out.
 import { useRef, type ReactNode } from "react";
 import { useFrame } from "@react-three/fiber";
-import { LoopOnce, type Group, type Mesh } from "three";
+import { LoopOnce, Vector3, type Group, type Mesh } from "three";
 import { HEAD_ATTACHMENT_POINTS } from "@vincentt-xr/sdk/face-effects";
 
 import { Bump } from "./Bump";
 import { ageOf, LIFE, useOnFace, type Hit } from "./hits";
 import { Part, type Arrange } from "./Part";
-import { BUMP, BUMP_TILT, FRAME, STICK, type Part as PartSpec } from "./props";
+import {
+  BUMP,
+  BUMP_TILT,
+  FRAME,
+  STICK,
+  stickPoint,
+  type Part as PartSpec,
+} from "./props";
 
 const SKULL = HEAD_ATTACHMENT_POINTS.headCenter;
 
@@ -112,15 +119,8 @@ const EXIT: Record<Kind3, Exit> = {
   dart: { time: 0.5, move: [2, 7, 14], turn: [-1.6, 0, 0.8] },
   // Sinks into nothing.
   snow: { time: 0.9, move: [0, -2.5, 0], turn: [0, 0, 0], sink: true },
-  // Slides off the side of your head and drops.
-  fish: { time: 1.2, move: [-14, -26, 3], turn: [0, 0, 1.1] },
-};
-
-/** Where each piece turns as it leaves (canonical cm, before its tilt). */
-const SPOT: Record<Kind3, [number, number, number]> = {
-  dart: [-1.7, 11.2, 3.8],
-  snow: [0, 12.5, -3],
-  fish: [-1, 13, -3],
+  // Slides down off your cheek and drops.
+  fish: { time: 1.2, move: [-6, -28, 4], turn: [0, 0, 0.7] },
 };
 
 /** Turned about the middle of the skull; children in canonical cm. */
@@ -175,14 +175,22 @@ const Leaving = ({
   );
 };
 
+/** Where each piece turns as it leaves: where it landed (canonical cm). */
+const SPOT = Object.fromEntries(
+  (["dart", "snow", "fish"] as const).map((k) => [
+    k,
+    stickPoint(k, new Vector3()).toArray(),
+  ]),
+) as Record<Kind3, [number, number, number]>;
+
 const Piece = ({ kind, hit }: { kind: Kind3; hit: Hit }) => (
-  <Turned tilt={STICK[kind].tilt}>
-    <Leaving hit={hit} life={LIFE[kind]} exit={EXIT[kind]} spot={SPOT[kind]}>
+  <Leaving hit={hit} life={LIFE[kind]} exit={EXIT[kind]} spot={SPOT[kind]}>
+    <Turned tilt={STICK[kind].tilt}>
       <group scale={FRAME.scale} position={FRAME.position}>
         <Part part={STICK[kind].part as PartSpec} arrange={ARRANGE[kind]} />
       </group>
-    </Leaving>
-  </Turned>
+    </Turned>
+  </Leaving>
 );
 
 export const Stuck = () => {

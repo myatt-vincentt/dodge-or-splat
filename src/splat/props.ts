@@ -45,6 +45,8 @@ export type Stick = {
    * z), so pieces that would all sit on the crown spread over the head.
    */
   tilt?: [number, number];
+  /** Lands exactly here instead (canonical cm, after the turn). */
+  at?: [number, number, number];
 };
 
 export const STICK: Readonly<Record<Kind, Stick>> = {
@@ -64,11 +66,13 @@ export const STICK: Readonly<Record<Kind, Stick>> = {
     aim: [0, 2.5, -0.5],
     tilt: [-0.3, 0],
   },
+  // Turned down off the crown so it lies across the side of the face, over
+  // the cheek.
   fish: {
     part: { id: "funny-fish-flop" },
     point: "forehead",
-    aim: [-2.5, 2.5, -0.8],
-    tilt: [0, 0.5],
+    tilt: [0.45, 1.15],
+    at: [-5, -0.5, 4.5],
   },
 };
 
@@ -94,6 +98,7 @@ const nudge = new Vector3();
  */
 export const stickPoint = (kind: Kind, out: Vector3) => {
   const s = STICK[kind];
+  if (s.at) return out.fromArray(s.at);
   getHeadAttachmentPoint(s.point, out);
   if (s.aim) out.add(nudge.fromArray(s.aim));
   if (!s.tilt) return out;

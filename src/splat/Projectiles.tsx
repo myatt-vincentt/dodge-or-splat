@@ -78,15 +78,28 @@ const LOOK: Record<
      * pie shows its cream, the dart its side.
      */
     lean: number;
+    /**
+     * Keeps its top (+Z) toward the camera the whole way, tipped by `lean`
+     * so only a thin rim of what is under it shows (the pie's tin).
+     */
+    faceCamera?: boolean;
+    /** Starts this share of the way to the face (else the throw's own). */
+    near?: number;
+    /** Shrinks to this extra scale by the middle of the arc (strict ease-out). */
+    shrinkTo?: number;
   }
 > = {
+  // Small enough that, even at its closest, it is no wider than the face.
   pie: {
-    scale: 0.8,
+    scale: 0.45,
     trail: "#fff4e0",
-    puff: 15,
-    wobble: 0.25,
-    spin: 1.2,
-    lean: 1.9,
+    puff: 9,
+    wobble: 0.18,
+    spin: 1.6,
+    lean: 0.4,
+    faceCamera: true,
+    near: 0.72,
+    shrinkTo: 0.8,
   },
   dart: {
     scale: 1.5,
@@ -204,6 +217,7 @@ const next0 = [0, 0, 0];
 const vel = new Vector3();
 const FORWARD = new Vector3(0, 0, 1);
 const SIDE = new Vector3(1, 0, 0);
+const toCam = new Vector3();
 const q = new Quaternion();
 const tumble = new Quaternion();
 
@@ -309,7 +323,10 @@ export const Projectiles = ({
         .unproject(camera)
         .sub(camera.position)
         .normalize()
-        .multiplyScalar(plan.near * camera.position.distanceTo(free.to))
+        .multiplyScalar(
+          (LOOK[l.kind].near ?? plan.near) *
+            camera.position.distanceTo(free.to),
+        )
         .add(camera.position);
       KINDS.forEach((k) => {
         free.models[k].visible = k === l.kind;
@@ -381,8 +398,14 @@ export const Projectiles = ({
           .set(at[0] - next0[0], at[1] - next0[1], at[2] - next0[2])
           .normalize();
       }
-      // Lead with the hitting side, tumbling a little about the flight.
-      q.setFromUnitVectors(FORWARD, vel);
+      // Lead with the hitting side (or show the camera its top), tumbling a
+      // little about the flight.
+      if (look.faceCamera)
+        q.setFromUnitVectors(
+          FORWARD,
+          toCam.copy(camera.position).sub(group.position).normalize(),
+        );
+      else q.setFromUnitVectors(FORWARD, vel);
       q.multiply(tumble.setFromAxisAngle(SIDE, look.lean));
       const t = now - slot.t0;
       tumble.setFromAxisAngle(
@@ -393,7 +416,10 @@ export const Projectiles = ({
       tumble.setFromAxisAngle(FORWARD, t * look.spin + slot.phase);
       q.multiply(tumble);
       group.quaternion.copy(q);
-      group.scale.setScalar(s * look.scale * Math.max(shrink, 1e-3));
+      const early = look.shrinkTo
+        ? 1 - (1 - look.shrinkTo) * (1 - (1 - Math.min(1, u / 0.55)) ** 3)
+        : 1;
+      group.scale.setScalar(s * look.scale * early * Math.max(shrink, 1e-3));
       group.visible = true;
 
       // The trail: this frame's position first, older ones after.
