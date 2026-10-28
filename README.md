@@ -1,3 +1,24 @@
+# Dodge or Splat
+
+Funny things are thrown at your face, and they never stop: mostly cream pies, plus suction darts,
+snowballs and fish. They come from the phone's side, from past the screen edges, faster and
+faster. Lean or duck and they whoosh past; stay put and they hit hard and stay a while. A pie
+leaves a thick coat of whipped cream that slides down and drips off your chin, a snowball leaves
+snow that melts, a dart wobbles on your forehead, a fish flops on your cheek. Tap the screen to
+throw a pie yourself. No lives, no score, no end.
+
+- Throws aim where your face is when they're thrown (`src/splat/director.ts`, `flight.ts`) and
+  draw over everything (`Projectiles.tsx`); near misses get a whoosh (`Whoosh.tsx`).
+- Cream and snow sit on the live face mesh, so they move with your expressions
+  (`FaceMess.tsx`); the dart, snow pile, fish and bonk bump are vincentt.studio head accessories
+  on the SDK's canonical head fit with the head occluder (`Stuck.tsx`).
+- The only hint is a small see-through ghost head that leans out of a pie's way (`Hint.tsx`).
+- Models: `public/models/vincentt-funny-*.glb` (`src/splat/props.ts`). Credits in `CREDITS.md`.
+- Dev preview without a camera: the media switcher starts on the SDK's sample video; 1–5 throw
+  a sure hit, 0 clears the face, P pauses the throws. How it works: `PLAN.md`.
+
+---
+
 # v2-template
 
 The Vincentt starter app: a real React + R3F + Vincentt XR SDK (`@vincentt-xr/sdk`)
