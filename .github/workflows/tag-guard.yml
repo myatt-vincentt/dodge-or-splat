@@ -1,0 +1,27 @@
+name: Tag Guard
+# Judges every pushed tag, including ones Release does not match (v1.2.3), so a
+# misnamed tag goes red instead of silently never reaching `latest`. `latest`
+# itself is excluded: Release force-moves it, and that push does not trigger
+# workflows anyway.
+
+on:
+  push:
+    tags:
+      - "**"
+      - "!latest"
+
+jobs:
+  guard:
+    # This file ships into every scaffolded project; only this repo's tags are releases.
+    if: github.repository == 'vincentt-xr/v2-template'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Tag is bare semver and on main
+        env:
+          TAG: ${{ github.ref_name }}
+        run: bash scripts/tag-guard.sh "$TAG"

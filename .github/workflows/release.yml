@@ -1,0 +1,275 @@
+name: Release
+# Moves the `latest` tag to whatever bare-semver tag was just pushed.
+#
+# `vincentt init` clones this repo at `--branch latest` (@vincentt-xr/cli), so
+# `latest` — not `main` — is what reaches a new creator. Merging to main no longer
+# ships a template; cutting a release does. That is the whole point: a bad merge
+# sits on main until someone deliberately tags it.
+#
+# Tags are BARE semver (1.0.0), no `v` prefix, matching api and console.
+#
+# `latest` is a MOVING tag, which is unusual for git but is exactly what a floating
+# release pointer is. It is force-updated here and nowhere else — never move it by
+# hand, or the pointer stops matching the version it claims to be.
+
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Bare-semver tag to point `latest` at (e.g. 1.0.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  move-latest:
+    # This file ships into every scaffolded project; a semver tag there must not
+    # force-move the creator's own `latest`.
+    if: github.repository == 'vincentt-xr/v2-template'
+    # The prod publisher token lives only in this environment, which allows
+    # bare-semver tags alone. A workflow_dispatch must therefore be run from a
+    # tag ref ("Use workflow from: <tag>"); a dispatch from main is refused.
+    environment: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve the release tag
+        id: rel
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="$INPUT_REF"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          if ! git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "::error::tag ${TAG} does not exist"
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "sha=$(git rev-list -n1 "refs/tags/${TAG}")" >> "$GITHUB_OUTPUT"
+
+      # Runs from the workflow's own tree, before the tagged tree is checked out.
+      # workflow_dispatch takes any ref, so this is also what stops `latest`
+      # being pointed at a branch-only commit or a non-release tag.
+      - name: The release tag is bare semver and on main
+        env:
+          TAG: ${{ steps.rel.outputs.tag }}
+        run: bash scripts/tag-guard.sh "$TAG"
+
+      # A scaffold is an install + build from a frozen lockfile, so that is what is
+      # verified here -- against the tagged commit, not against main. Smoke Build
+      # already gates every PR; this re-runs it at the exact tree `latest` will
+      # point at, because that tree is what every new creator gets.
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # Taken from origin/main, NOT from the tagged tree: the note is reviewed
+      # via PR into main and is append-only per version, so main's copy is the
+      # reviewed source for ANY tag. Every tag before this PR carries neither
+      # file at all, so reading them from the tag would fail the one-time
+      # bootstrap (workflow_dispatch on an old tag) forever. The initial
+      # checkout above already ran with fetch-depth 0 ("all history for all
+      # branches and tags"), so origin/main is already present; `git fetch` is
+      # a cheap no-op guard in case that ever changes.
+      #
+      # A corrected MIGRATION.md entry reaches the platform only by dispatching
+      # this workflow at the NEWEST tag: the api corrects only the newest row's
+      # note. Dispatching at an older tag moves `latest` backwards and corrects
+      # nothing.
+      - name: Prepare the release-row script and note from main
+        run: |
+          mkdir -p "$RUNNER_TEMP/release-row"
+          git fetch origin main
+          git show origin/main:scripts/release-row.mjs > "$RUNNER_TEMP/release-row/release-row.mjs"
+          git show origin/main:MIGRATION.md > "$RUNNER_TEMP/release-row/MIGRATION.md"
+
+      - name: Check out the tagged tree
+        env:
+          SHA: ${{ steps.rel.outputs.sha }}
+        run: git checkout --force "$SHA"
+
+      # An early gate, ahead of install/build: a tag with no valid migration
+      # note must never reach `latest`. --dry-run only parses and bounds-checks
+      # the note (f17 §2.4) — no network, no secrets needed, so this runs
+      # before the credentialed write step below and fails fast on a bad note.
+      - name: A migration note exists for the release tag
+        env:
+          TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          node "$RUNNER_TEMP/release-row/release-row.mjs" "$TAG" \
+            --migration "$RUNNER_TEMP/release-row/MIGRATION.md" --dry-run
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Test
+        run: pnpm test
+
+      # The same grounding assertions Smoke Build runs on the branch, re-run here
+      # against the TAGGED tree. These steps sit after `Check out the tagged tree`
+      # deliberately: placed before it they would inspect main, and `latest` --
+      # not main -- is what reaches a creator. A check that does not run at the
+      # tag does not protect the artifact.
+      #
+      # The filename list is read from .github/pointers.txt, the same file
+      # smoke-build.yml reads, so a second host's pointer is one line in one
+      # place and is checked on the branch AND at the tag.
+      - name: Pointers carry no content
+        run: |
+          if [ ! -f .github/pointers.txt ]; then
+            echo "::error::.github/pointers.txt is missing — the pointer checks would silently pass with nothing checked."
+            exit 1
+          fi
+          while read -r f; do
+            [ -n "$f" ] || continue
+            lines=$(wc -l < "$f")
+            bytes=$(wc -c < "$f")
+            if [ "$lines" -gt 12 ]; then
+              echo "::error file=$f::pointer is $lines lines (max 12) — it has grown content. The loop contract is AGENTS.md."
+              exit 1
+            fi
+            if [ "$bytes" -gt 1200 ]; then
+              echo "::error file=$f::pointer is $bytes bytes (max 1200) — it has grown content. The loop contract is AGENTS.md."
+              exit 1
+            fi
+            if grep -qE '(npx )?vincentt [a-z]+' "$f"; then
+              echo "::error file=$f::pointer names a vincentt verb — a verb list is the loop contract's job, not a pointer's."
+              exit 1
+            fi
+          done < .github/pointers.txt
+
+      - name: The loop contract names no host
+        run: |
+          if grep -qiE 'claude|cursor|codex|copilot|self-schedule' AGENTS.md; then
+            echo "::error file=AGENTS.md::the loop contract names a host or the withdrawn self-schedule path (B-F3-5 tripwire a/b)."
+            exit 1
+          fi
+
+      # create scaffolds an empty folder, then registers. The verb list must say
+      # so: grounding ships into creators' repositories and is never read back
+      # (B-F3-5 tripwire c), so a behavior change we do not land in the same
+      # commit is unseeable, unwarnable and unfixable (B-F2-9).
+      - name: The verb list describes what create does about the folder
+        run: |
+          if ! grep -qiE 'scaffolds the starter first' AGENTS.md; then
+            echo "::error file=AGENTS.md::the verb list does not say what \`create\` does about an empty folder. It scaffolds, then registers (create-scaffolds, B-F2-9)."
+            exit 1
+          fi
+          if ! grep -qF 'vincentt init' AGENTS.md; then
+            echo "::error file=AGENTS.md::the verb list does not name \`vincentt init\`. An authed path may absorb an unauthenticated capability only while the open route stays named (B-F2-9)."
+            exit 1
+          fi
+
+      # The recognition section promises the contract says how to find out which project a folder
+      # is, and what to do in each case. Run at the TAG as well as on the branch: the tag is what
+      # `init` clones, so a contract that lost the guidance between review and release would ship
+      # into every creator's repository and is never read back to be repaired (B-F3-5 tripwire c).
+      - name: The contract answers the recognition section's coming-back promise
+        run: |
+          if ! grep -qF 'vincentt projects' AGENTS.md; then
+            echo "::error file=AGENTS.md::the verb list does not name \`vincentt projects\`. The recognition section promises the contract says how to find out which project a folder is; the listing verb is that answer (B-F2-9)."
+            exit 1
+          fi
+          if ! grep -qF 'vincentt link <project-id>' AGENTS.md; then
+            echo "::error file=AGENTS.md::the contract does not name \`vincentt link <project-id>\`. It is the remedy the unknown case points at, and without it that branch has no next step (B-F2-9)."
+            exit 1
+          fi
+          if ! grep -qF '### Picking up a project' AGENTS.md; then
+            echo "::error file=AGENTS.md::the contract carries no \`Picking up a project\` guidance. Naming the verb without saying what to do with its three answers leaves the recognition section's promise unkept (B-F2-9)."
+            exit 1
+          fi
+          if ! grep -qF 'no folder known on this machine' AGENTS.md; then
+            echo "::error file=AGENTS.md::the contract does not repeat the CLI's unknown-case string verbatim. An agent matching output must find the same words here (B-F2-9)."
+            exit 1
+          fi
+          if ! grep -qF 'It does not go there.' AGENTS.md; then
+            echo "::error file=AGENTS.md::the contract does not say the listing reports a location without going there. An agent handed a path is the reader most likely to \`cd\` into it."
+            exit 1
+          fi
+
+      # The zone manifest at the TAG is the one every `vincentt upgrade` reads to decide
+      # what it may overwrite in a creator's repository. This job accepts
+      # workflow_dispatch with an arbitrary ref and force-moves `latest`, so `latest` is
+      # a single-actor lever over that manifest -- which is exactly why the same checks
+      # smoke-build.yml runs on the branch are re-run here against the tagged tree.
+      #
+      # One failure refuses the WHOLE manifest, and this step runs before `Move latest`,
+      # so a refused manifest never becomes the artifact.
+      - name: The zone manifest is complete and passes the floor
+        run: node scripts/check-zone-manifest.mjs --strict
+
+      # The recognition section is GENERATED from recognition.md in vincentt-xr/agent-plugin. A
+      # hand-edit here would put a sentence in every creator's tree without putting it in the
+      # file that also feeds the package. Run at the TAG, because a check not run at the tag does
+      # not protect the artifact -- and because the agent-plugin's own release gate refuses to
+      # publish unless the tag carries this exact section.
+      - name: The recognition section is generated, not authored
+        run: node scripts/check-recognition.mjs
+
+      # The create-endings section describes what `vincentt create` returns -- behavior owned by
+      # @vincentt-xr/cli in vincentt-xr/toolchain, asserted there against the same fixture. Run at
+      # the TAG for the same reason as the check above: the tag is what `vincentt init` clones, so
+      # a section correct only on the branch does not protect the artifact creators receive. This
+      # is the artifact that was wrong about `create` for weeks (B-F2-9(b)).
+      - name: The create-endings section matches the CLI's fixture
+        run: node scripts/check-create-endings.mjs
+
+      # Only now is the tag known good. Moving `latest` before this point would
+      # publish a broken template to every `vincentt init` for as long as it took
+      # someone to notice.
+      - name: Move `latest`
+        env:
+          TAG: ${{ steps.rel.outputs.tag }}
+          SHA: ${{ steps.rel.outputs.sha }}
+        run: |
+          git tag --force latest "$SHA"
+          git push --force origin refs/tags/latest
+          echo "latest -> ${TAG} (${SHA})" >> "$GITHUB_STEP_SUMMARY"
+
+      # Only now does the platform learn about it: the artifact is public (the
+      # gates above passed and `latest` moved), which is the ordering f17 §2.3
+      # requires — a row naming a version before it is installable would tell
+      # an agent to install something that does not exist yet. Idempotent on
+      # (component, version), so a re-run (including the one-time bootstrap via
+      # workflow_dispatch on an already-current tag) is a safe no-op.
+      - name: Write the platform release row
+        env:
+          RELEASE_ROWS_TARGETS: "staging=https://api.staging.vincentt.studio,prod=https://api.vincentt.studio"
+          RELEASE_PUBLISHER_TOKEN_STAGING: ${{ secrets.RELEASE_PUBLISHER_TOKEN_STAGING }}
+          RELEASE_PUBLISHER_TOKEN_PROD: ${{ secrets.RELEASE_PUBLISHER_TOKEN_PROD }}
+          # Overrides the default GITHUB_SHA, which is the run's ref SHA and is
+          # WRONG for workflow_dispatch (it would be main's HEAD, not the
+          # tag's). steps.rel.outputs.sha is resolved for both trigger paths.
+          GITHUB_SHA: ${{ steps.rel.outputs.sha }}
+          TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          node "$RUNNER_TEMP/release-row/release-row.mjs" "$TAG" \
+            --migration "$RUNNER_TEMP/release-row/MIGRATION.md"

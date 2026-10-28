@@ -1,0 +1,30 @@
+name: Release Pointer
+# Daily: `latest` (what `vincentt init` clones) must be the highest release tag,
+# and the SDK and harness it locks must be npm's `latest` dist-tag. A Release
+# run that dies before `Move latest`, or a package that ships without the
+# template following, is otherwise silent until a creator scaffolds stale code.
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+jobs:
+  check:
+    # This file ships into every scaffolded project, which has no `latest` tag.
+    if: github.repository == 'vincentt-xr/v2-template'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch tags
+        run: git fetch --tags --force origin
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: "`latest` is the highest release and follows npm"
+        run: node scripts/check-release-pointer.mjs
