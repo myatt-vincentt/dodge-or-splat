@@ -1,10 +1,10 @@
 {
   "title": "Dodge or Splat",
   "description": "Funny things fly at your face. Move your head to dodge them, or wear the splat.",
-  "image": "/images/og-default.jpg",
-  "imageAlt": "Dodge or Splat \u2014 a camera experience built with Vincentt",
-  "imageWidth": 1200,
-  "imageHeight": 630,
+  "image": "/images/dodge-or-splat-thumbnail.jpg",
+  "imageAlt": "Dodge or Splat — a camera experience built with Vincentt",
+  "imageWidth": 941,
+  "imageHeight": 1672,
   "imageType": "image/jpeg",
   "url": "https://dodge-or-splat.vincentt.app"
 }

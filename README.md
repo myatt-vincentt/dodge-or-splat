@@ -7,6 +7,7 @@ leaves a thick coat of whipped cream that slides down and drips off your chin, a
 snow that melts, a dart wobbles on your forehead, a fish flops on your cheek. Tap the screen to
 throw a pie yourself. No lives, no score, no end.
 
+- Thumbnail: `public/images/dodge-or-splat-thumbnail.jpg` (the share image).
 - Throws aim where your face is when they're thrown (`src/splat/director.ts`, `flight.ts`) and
   draw over everything (`Projectiles.tsx`); near misses get a whoosh (`Whoosh.tsx`).
 - Cream and snow sit on the live face mesh, so they move with your expressions
